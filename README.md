@@ -11,6 +11,6 @@ Decision 2016: code and data for "America's Next Top (Statistical) Model" challe
 Predicting state-by-state results of the 2016 presidential election. Finished 3rd out of 16.
 
 Pover-T Tests: code and data cleaning/formatting for "Pover-T Tests: Predicting Poverty" challenge.
-Predicting the probability that households in three countries are living in poverty. Currently in top ~8%.
+Predicting whether households in three countries are living in poverty. Currently in top ~8%.
 
 More information at https://www.drivendata.org/.
