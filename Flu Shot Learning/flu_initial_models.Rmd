@@ -1,0 +1,270 @@
+---
+title: "Flu Shot Learning"
+author: "Lisa Wilson"
+date: "10/6/2021"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+setwd("~/Documents/DrivenData/Flu Shot Learning/")
+
+library(tidyverse)
+library(magrittr)
+library(GGally)
+library(AUC)
+library(randomForest)
+library(mice)
+```
+
+```{r data}
+train_exp <- read.csv("flu_train_features.csv")
+train_resp <- read.csv("flu_train_labels.csv")
+test_exp <- read.csv("flu_test_features.csv")
+
+summary(train_exp)
+
+# scratch
+classes <- sapply(train_exp, class) 
+str(classes)
+classes == "character"
+
+train_exp <- train_exp %>% mutate_if(is.character, as.factor)
+test_exp <- test_exp %>% mutate_if(is.character, as.factor)
+summary(train_exp)
+str(train_exp)
+
+train_full <- inner_join(train_resp, train_exp, by = "respondent_id")
+head(train_full)
+
+# ggpairs(select_if(train_exp, is.numeric))
+# pairs(train_exp[,-1])
+
+summary(train_full$h1n1_vaccine)
+summary(train_full$seasonal_vaccine)
+
+summary(train_full$health_insurance)
+head(train_full$health_insurance)
+ggplot(data = train_full, aes(x = as.factor(health_insurance))) +
+    geom_bar(aes(fill = as.factor(h1n1_vaccine))) +
+    scale_fill_brewer(palette = "Set2") + 
+    labs(x = "Has health insurance", y = "", fill = "Received H1N1 vaccine")
+chisq.test(as.factor(train_full$health_insurance), as.factor(train_full$h1n1_vaccine))
+# cor(train_full$health_insurance, train_full$h1n1_vaccine)
+
+# employment_occupation, employment_industry
+ggplot(data = train_full, aes(x = as.factor(h1n1_vaccine))) +
+    geom_bar(aes(fill = as.factor(employment_occupation))) +
+    # scale_fill_brewer(palette = "Set2") + 
+    labs(x = "Received H1N1 vaccine", y = "", fill = "Employment occupation")
+chisq.test(train_full$employment_occupation, train_full$h1n1_vaccine)
+
+ggplot(data = train_full, aes(x = as.factor(h1n1_vaccine))) +
+    geom_bar(aes(fill = as.factor(employment_industry))) +
+    # scale_fill_brewer(palette = "Set2") + 
+    labs(x = "Received H1N1 vaccine", y = "", fill = "Employment industry")
+chisq.test(train_full$employment_industry, train_full$h1n1_vaccine)
+```
+
+### Random forest
+```{r rf}
+set.seed(42)
+
+train_primary <- sample_n(train_full, nrow(train_full)*0.8)
+train_hold <- anti_join(train_full, train_primary, by = "respondent_id")
+
+# rf1_h <- randomForest(train_primary[,-c(1:3)], as.factor(train_primary$h1n1_vaccine), na.action = na.roughfix)
+# produces a lot of NAs in prediction
+# rf1_h <- randomForest(as.factor(h1n1_vaccine) ~ .-respondent_id-seasonal_vaccine, data = train_primary, na.action = na.roughfix)
+# realllly slow
+#train_primary_imp <- rfImpute(as.factor(h1n1_vaccine) ~ ., data = train_primary[,-c(1,3)])
+rf1_h <- randomForest(as.factor(h1n1_vaccine) ~ ., data = train_primary[,-c(1,3)], na.action = na.omit)
+rf1_h_tr_class <- predict(rf1_h, train_hold, type = "class")
+# still too many NAs
+rf1_h_tr_prob <- predict(rf1_h, train_hold, type = "prob")
+
+# test_pred <- sample(seq(0, 1, by = 0.00001), nrow(train_hold), replace = TRUE)
+# auc(roc(test_pred, as.factor(train_hold$h1n1_vaccine)))
+
+auc(roc(rf1_h_tr_prob[,1], as.factor(train_hold$h1n1_vaccine)))
+```
+
+#### Imputation
+```{r mice walkthrough}
+# https://data.library.virginia.edu/getting-started-with-multiple-imputation-in-r/
+set.seed(84)
+
+# reload/reformat data
+train_exp <- read.csv("flu_train_features.csv")
+train_resp <- read.csv("flu_train_labels.csv")
+test_exp <- read.csv("flu_test_features.csv")
+train_full <- inner_join(train_resp, train_exp, by = "respondent_id")
+
+# change blanks to NA
+train_full <- mutate_all(train_full, list(~na_if(.,"")))
+
+train_full <- train_full %>% mutate_if(is.character, as.factor)
+
+# percent of missing data by varb
+p_missing <- unlist(lapply(train_full, function(x) sum(is.na(x))))/nrow(train_full)
+sort(p_missing[p_missing > 0], decreasing = TRUE)
+# complete varbs
+comp_varbs <- names(train_full)[!(names(train_full) %in% names(p_missing[p_missing > 0]))]
+
+# will need to deal with these though
+# health_insurance at least seems to have correlation 
+# (how to calculate correlation?)
+train_full_drop <- train_full %>%
+    select(-c(health_insurance, employment_occupation, employment_industry))
+
+# Binary variables
+logi <- names(train_full_drop)[6:17]
+
+# Ordered categorical varbs
+poly <- names(train_full_drop)[c(4:5, 18:23, 24:25, 28)]
+
+# Unordered categorical varbs (prev also 36:37)
+poly2 <- names(train_full_drop)[c(26:27, 29:33)]
+
+# Transformation that should have been done earlier
+train_full_drop <- train_full_drop %<>% mutate_at(c(logi, poly), factor)
+
+imp <- mice(train_full_drop, maxit = 0)
+# Extract predictorMatrix and methods of imputation 
+predM <- imp$predictorMatrix
+meth <- imp$method
+
+# Turn their methods matrix into the specified imputation models
+meth[poly] <- "polr"
+meth[logi] <- "logreg"
+meth[poly2] <- "polyreg"
+# also need to exclude varbs that are complete (also w/ too many levels)
+meth[c(comp_varbs)] <- ""
+
+# maxit = 5 --> way too long
+# maxit = 1 --> 10:51-11:08; ~12:06-12:17; 12:51-1:01
+imp2 <- mice(train_full_drop, maxit = 1, 
+             predictorMatrix = predM, 
+             method = meth, print =  FALSE)
+
+train_full_comp <- complete(imp2)
+head(train_full_comp)
+```
+
+```{r rf with imputed data}
+set.seed(84)
+
+train_primary_imp <- train_full_comp %>%
+    filter(respondent_id %in% train_primary$respondent_id)
+train_hold_imp <- anti_join(train_full_comp, train_primary_imp, by = "respondent_id")
+
+rf1_imp_h <- randomForest(as.factor(h1n1_vaccine) ~ ., data = train_primary_imp[,-c(1,3)])
+
+rf1_imp_h_tr_class <- predict(rf1_imp_h, train_hold_imp, type = "class")
+rf1_imp_h_tr_prob <- predict(rf1_imp_h, train_hold_imp, type = "prob")
+
+rf1_imp_h_tr_auc0 <- auc(roc(rf1_imp_h_tr_prob[,1], as.factor(train_hold_imp$h1n1_vaccine)))
+# 0.8373 (1st - still many blanks; same 2nd)
+rf1_imp_h_tr_auc1 <- auc(roc(rf1_imp_h_tr_prob[,2], as.factor(train_hold_imp$h1n1_vaccine))) 
+mean(c(rf1_imp_h_tr_auc0, rf1_imp_h_tr_auc1)) # no
+
+# full training dataset, then predictions on test set
+rf1_imp_h <- randomForest(as.factor(h1n1_vaccine) ~ ., data = train_full_comp[,-c(1,3)])
+rf1_imp_s <- randomForest(as.factor(seasonal_vaccine) ~ ., data = train_full_comp[,-c(1:2)])
+
+test_exp <- mutate_all(test_exp, list(~na_if(.,"")))
+
+test_exp <- test_exp %>% mutate_if(is.character, as.factor)
+
+# will need to deal with these though
+# health_insurance at least seems to have correlation 
+# (how to calculate correlation?)
+test_exp_drop <- test_exp %>%
+    select(-c(health_insurance, employment_occupation, employment_industry))
+
+# Binary variables
+logi <- names(test_exp_drop)[4:15]
+
+# Ordered categorical varbs
+poly <- names(test_exp_drop)[c(2:3, 16:21, 22:23, 26)]
+
+# Unordered categorical varbs (prev also 36:37)
+poly2 <- names(test_exp_drop)[c(24:25, 27:31)]
+
+comp_varbs_test <- comp_varbs[c(1, 4:8)] 
+
+# Transformation that should have been done earlier
+test_exp_drop <- test_exp_drop %<>% mutate_at(c(logi, poly), factor)
+
+imp <- mice(test_exp_drop, maxit = 0)
+# Extract predictorMatrix and methods of imputation 
+predM <- imp$predictorMatrix
+meth <- imp$method
+
+# Turn their methods matrix into the specified imputation models
+meth[poly] <- "polr"
+meth[logi] <- "logreg"
+meth[poly2] <- "polyreg"
+# also need to exclude varbs that are complete (also w/ too many levels)
+meth[c(comp_varbs_test)] <- ""
+
+# 1:22-1:32
+imp2 <- mice(test_exp_drop, maxit = 1, 
+             predictorMatrix = predM, 
+             method = meth, print =  FALSE)
+
+test_exp_comp <- complete(imp2)
+
+rf1_imp_h_class <- predict(rf1_imp_h, test_exp_comp, type = "class")
+rf1_imp_h_prob <- predict(rf1_imp_h, test_exp_comp, type = "prob")
+rf1_imp_s_class <- predict(rf1_imp_s, test_exp_comp, type = "class")
+rf1_imp_s_prob <- predict(rf1_imp_s, test_exp_comp, type = "prob")
+
+rf1_imp_pred <- data.frame(respondent_id = test_exp_drop$respondent_id, h1n1_vaccine = rf1_imp_h_prob[,2], seasonal_vaccine = rf1_imp_s_prob[,2])
+
+# 0.8312, woo!
+write.csv(rf1_imp_pred, "rf1_imp_pred.csv", row.names = FALSE)
+```
+
+```{r rf using other response}
+# train_dropped <- read_csv("flu_train_features.csv",
+                          #col_types = cols_only(
+                              #respondent_id = col_integer(),
+                              #health_insurance = col_character(),
+                              #employment_industry = col_character(),
+                              #employment_occupation = col_character()
+                          #))
+# train_dropped <- train_dropped %>% mutate_if(is.character, as.factor)
+
+train_full_plus <- inner_join(train_full_comp, train_full[,c("respondent_id", "health_insurance", "employment_industry", "employment_occupation")], by = "respondent_id")
+train_full_plus <- train_full_plus %>% 
+    mutate(employment_industry = as.character(employment_industry), employment_occupation = as.character(employment_occupation))
+train_full_plus <- train_full_plus %>%
+    replace_na(list(health_insurance = 2, employment_industry = "unknown", employment_occupation = "unknown"))
+train_full_plus <- train_full_plus %>% mutate_if(is.character, as.factor)
+train_full_plus$health_insurance <- as.factor(train_full_plus$health_insurance)
+
+test_exp_plus <- inner_join(test_exp_comp, test_exp[,c("respondent_id", "health_insurance", "employment_industry", "employment_occupation")], by = "respondent_id")
+test_exp_plus <- test_exp_plus %>% 
+    mutate(employment_industry = as.character(employment_industry), employment_occupation = as.character(employment_occupation))
+# create dummy categories for NA values
+test_exp_plus <- test_exp_plus %>%
+    replace_na(list(health_insurance = 2, employment_industry = "unknown", employment_occupation = "unknown"))
+test_exp_plus <- test_exp_plus %>% mutate_if(is.character, as.factor)
+test_exp_plus$health_insurance <- as.factor(test_exp_plus$health_insurance)
+
+rf2_imp_h <- randomForest(as.factor(h1n1_vaccine) ~ ., data = train_full_plus[,-c(1,3)])
+rf2_imp_s <- randomForest(as.factor(seasonal_vaccine) ~ ., data = train_full_plus[,-c(1:2)])
+
+rf2_imp_h_class <- predict(rf2_imp_h, test_exp_plus, type = "class")
+rf2_imp_h_prob <- predict(rf2_imp_h, test_exp_plus, type = "prob")
+rf2_imp_s_class <- predict(rf2_imp_s, test_exp_plus, type = "class")
+rf2_imp_s_prob <- predict(rf2_imp_s, test_exp_plus, type = "prob")
+
+rf2_imp_pred <- data.frame(respondent_id = test_exp_plus$respondent_id, h1n1_vaccine = rf2_imp_h_prob[,2], seasonal_vaccine = rf2_imp_s_prob[,2])
+
+# 0.8478, woo!
+write.csv(rf2_imp_pred, "rf2_imp_pred.csv", row.names = FALSE)
+```
+
